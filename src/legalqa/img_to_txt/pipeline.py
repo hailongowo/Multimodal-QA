@@ -41,12 +41,22 @@ def load_description_index(output_dir: Path, expected_fingerprint: str):
         raise ValueError("candidate and embedding counts differ")
     return candidates, embeddings
 
-def run_pipeline(questions, descriptions, candidates, candidate_embeddings, encoder, reranker, chunk_shortlist_size=200, article_shortlist_size=50, chunks_per_article=3, top_k=5):
-    dense_rankings, reranked_rankings = [], []
+def prepare_dense_stage(questions, descriptions, candidate_embeddings, encoder):
+    queries, scores = [], []
     for question in questions:
         query = build_dense_query(question, descriptions)
-        scores = encoder.score_query(query, candidate_embeddings)
+        queries.append(query)
+        scores.append(encoder.score_query(query, candidate_embeddings))
+    return queries, scores
+
+def rerank_dense_stage(questions, queries, dense_scores, candidates, reranker, chunk_shortlist_size=200, article_shortlist_size=50, chunks_per_article=3, top_k=5):
+    dense_rankings, reranked_rankings = [], []
+    for query, scores in zip(queries, dense_scores):
         evidence = select_article_evidence(scores, candidates, chunk_shortlist_size, article_shortlist_size, chunks_per_article)
         dense_rankings.append(np.asarray([item["indices"][0] for item in evidence]))
         reranked_rankings.append(rerank_articles(query, candidates, evidence, reranker))
     return build_predictions(questions, dense_rankings, candidates, top_k), build_predictions(questions, reranked_rankings, candidates, top_k)
+
+def run_pipeline(questions, descriptions, candidates, candidate_embeddings, encoder, reranker, chunk_shortlist_size=200, article_shortlist_size=50, chunks_per_article=3, top_k=5):
+    queries, scores = prepare_dense_stage(questions, descriptions, candidate_embeddings, encoder)
+    return rerank_dense_stage(questions, queries, scores, candidates, reranker, chunk_shortlist_size, article_shortlist_size, chunks_per_article, top_k)

@@ -28,8 +28,7 @@ class BGEM3TextEncoder:
             for start in range(0, len(texts), self.batch_size):
                 inputs = self.tokenizer(texts[start:start + self.batch_size], padding=True, truncation=True, max_length=self.max_length, return_tensors="pt").to(self.device)
                 hidden = self.model(**inputs).last_hidden_state
-                mask = inputs["attention_mask"].unsqueeze(-1).to(hidden.dtype)
-                pooled = (hidden * mask).sum(1) / mask.sum(1).clamp(min=1)
+                pooled = hidden[:, 0]
                 norms = pooled.norm(dim=1, keepdim=True)
                 if self.torch.any(norms == 0):
                     raise ValueError("encoder produced a zero-norm embedding")

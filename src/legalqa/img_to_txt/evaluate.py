@@ -1,6 +1,6 @@
 """Run BGE-M3 retrieval and cross-encoder reranking over image descriptions."""
 from __future__ import annotations
-import argparse, json, sys
+import argparse, gc, json, sys
 from pathlib import Path
 if __package__ in (None, ""): sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from legalqa.data.loaders import read_json
@@ -8,7 +8,7 @@ from legalqa.evaluation.metrics import eval_retrieval
 from legalqa.img_to_txt.chunks import load_description_chunks
 from legalqa.img_to_txt.encoder import BGEM3TextEncoder
 from legalqa.img_to_txt.evaluation import load_test_descriptions
-from legalqa.img_to_txt.pipeline import build_index_fingerprint, load_description_index, run_pipeline, save_description_index
+from legalqa.img_to_txt.pipeline import build_index_fingerprint, load_description_index, prepare_dense_stage, rerank_dense_stage, save_description_index
 from legalqa.structured_reranker.pipeline import CrossEncoderReranker
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -41,8 +41,16 @@ def main(argv=None):
         embeddings = encoder.encode_texts([x["text"] for x in candidates]); save_description_index(a.index_dir, candidates, embeddings, fingerprint)
     else: candidates, embeddings = cached
     questions = read_json(a.questions); descriptions = load_test_descriptions(a.test_descriptions)
+    queries, dense_scores = prepare_dense_stage(questions, descriptions, embeddings, encoder)
+    del encoder
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
+    except ImportError:
+        pass
     reranker = CrossEncoderReranker.load(a.reranker_model, a.device, a.reranker_batch_size, a.reranker_max_length)
-    dense, reranked = run_pipeline(questions, descriptions, candidates, embeddings, encoder, reranker, a.chunk_shortlist_size, a.article_shortlist_size, a.chunks_per_article, a.top_k)
+    dense, reranked = rerank_dense_stage(questions, queries, dense_scores, candidates, reranker, a.chunk_shortlist_size, a.article_shortlist_size, a.chunks_per_article, a.top_k)
     _write_json(a.output_dir / "dense_predictions.json", dense); _write_json(a.output_dir / "reranked_predictions.json", reranked)
     metrics = {"chunk_count": len(candidates), "top_k": a.top_k, "dense_model": a.dense_model, "reranker_model": a.reranker_model, "image_descriptions_used": True, "query_images_used": False}
     if questions and all("relevant_articles" in x for x in questions):
