@@ -1,0 +1,14 @@
+numpy
+tqdm
+beautifulsoup4>=4.12,<5
+pandas<3
+lxml
+tabulate
+torch
+transformers>=5.2,<6
+sentencepiece
+visual_bge @ git+https://github.com/FlagOpen/FlagEmbedding.git@fd1a2bdf69488ffebe0327999d4400d8c8058a0b#subdirectory=research/visual_bge
+accelerate>=1.1,<2
+bitsandbytes>=0.49,<1
+Pillow>=10,<13
+safetensors>=0.4,<1

@@ -1,0 +1,63 @@
+# Python bytecode and test/tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and local dependency/runtime copies
+.venv/
+venv/
+env/
+.deps/
+.runtime/
+
+# Editors, notebooks, and operating-system files
+.vscode/
+.idea/
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*.bak
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs
+*.log
+
+# Large ML artifacts, embeddings, and checkpoints
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.npy
+*.npz
+*.onnx
+
+# Local datasets and generated experiment artifacts
+data/
+artifacts/
+runs/
+reports/
+
+# Generated outputs; keep the documentation file in version control
+outputs/*
+!outputs/README.md
+
+# Build/package output
+build/
+dist/
+*.egg-info/
+
+tests
+docs
