@@ -15,7 +15,7 @@ def get_top_k(predict_output, top_k):
     return lst_out_one_hot
 
 
-def retrieve_articles(model, law_embeding, law_ids, image_path, question):
+def retrieve_articles(model, law_embeding, law_ids, image_path, question, top_k=5, return_rankings=False):
     def make_retrival(candidate):
         article_law = candidate.split("_")[0].split("-")[0]
         id_law = candidate.split("_")[1]
@@ -26,11 +26,18 @@ def retrieve_articles(model, law_embeding, law_ids, image_path, question):
     query_emb = model.encode(image=img_path, text=question["question"])
     similarities = query_emb.cpu().detach() @ law_embeding.T
     lst_similars = similarities.T.detach().numpy()
-    lst_oh = get_top_k(lst_similars, 5)
-    assert len(lst_oh) == len(law_ids)
-    # The official baseline scans corpus order after selecting the top-5 vectors.
-    for i in range(0, len(lst_oh)):
-        if lst_oh[i] > 0:
-            if make_retrival(law_ids[i]) not in relevant_ids:
-                relevant_ids.append(make_retrival(law_ids[i]))
-    return relevant_ids
+    # Keep the official top-5-vector prediction policy for F2.
+    selected = get_top_k(lst_similars.reshape(-1), 5)
+    official = []
+    for i in range(len(selected)):
+        reference = make_retrival(law_ids[i])
+        if selected[i] > 0 and reference not in official:
+            official.append(reference)
+    # Recall uses score-ordered unique articles, independent of prediction cutoff.
+    for i in np.argsort(-lst_similars.reshape(-1), kind="stable"):
+        reference = make_retrival(law_ids[i])
+        if reference not in relevant_ids:
+            relevant_ids.append(reference)
+            if len(relevant_ids) == top_k:
+                break
+    return (official, relevant_ids) if return_rankings else official

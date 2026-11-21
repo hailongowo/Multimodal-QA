@@ -26,12 +26,16 @@ class TrainingConfig:
     device: str = "cuda"
     seed: int = 42
     epochs: int = 5
-    batch_size: int = 4
+    batch_size: int = 1
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     temperature: float = 0.02
-    hard_negative_count: int = 4
-    accumulation_steps: int = 1
+    hard_negative_count: int = 1
+    accumulation_steps: int = 16
+    query_max_length: int = 256
+    document_max_length: int = 512
+    precision: str = "fp16"
+    gradient_checkpointing: bool = True
     max_gradient_norm: float = 1.0
     freeze_policy: str = "none"
     patience: int = 2
@@ -41,6 +45,13 @@ class TrainingConfig:
 
 
 def _validate_config(config: TrainingConfig) -> None:
+    for name in ("batch_size", "accumulation_steps", "query_max_length", "document_max_length"):
+        if getattr(config, name) < 1:
+            raise ValueError(f"{name} must be at least 1")
+    if config.hard_negative_count < 0:
+        raise ValueError("hard_negative_count must be nonnegative")
+    if config.precision not in {"fp32", "fp16", "bf16"}:
+        raise ValueError("precision must be fp32, fp16 or bf16")
     if config.max_train_samples is not None and config.max_train_samples < 1:
         raise ValueError("max_train_samples must be at least 1 or None")
     if config.log_every_steps < 1:
@@ -95,6 +106,17 @@ def train(config: TrainingConfig, adapter=None, validation_fn=None) -> dict:
         negatives = json.loads(config.negatives.read_text(encoding="utf-8"))
         fingerprints = {"manifest": fingerprint_json(manifest), "negatives": fingerprint_json(negatives)}
         adapter = adapter or load_visualized_bge(config.model_name, config.weights, config.device, config.freeze_policy)
+        adapter.configure_training(config.query_max_length, config.document_max_length,
+                                   config.gradient_checkpointing)
+        adapter.token_observer = lambda kind, shape: logger.info(
+            "Tokenized before encoder kind=%s shape=%s (batch, padded_tokens)", kind, shape)
+        amp_enabled = adapter.device.type == "cuda" and config.precision != "fp32"
+        amp_dtype = torch.bfloat16 if config.precision == "bf16" else torch.float16
+        if amp_enabled and config.precision == "bf16" and not torch.cuda.is_bf16_supported():
+            raise ValueError("This GPU does not support bf16; use fp16 or fp32")
+        scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled and config.precision == "fp16")
+        logger.info("Precision effective=%s text_gradient_checkpointing=%s",
+                    config.precision if amp_enabled else "fp32", config.gradient_checkpointing)
         dataset = FineTuneDataset(
             manifest,
             negatives,
@@ -110,10 +132,11 @@ def train(config: TrainingConfig, adapter=None, validation_fn=None) -> dict:
             len(manifest["candidates"]),
         )
         optimizer = torch.optim.AdamW((p for p in adapter.backend.parameters() if p.requires_grad),
-                                      lr=config.learning_rate, weight_decay=config.weight_decay)
+                                      lr=config.learning_rate, weight_decay=config.weight_decay, foreach=False)
         start_epoch, global_step, best_metric, history = 0, 0, float("-inf"), []
         if config.resume:
-            state = load_checkpoint(config.resume, adapter, optimizer, expected_fingerprints=fingerprints)
+            state = load_checkpoint(config.resume, adapter, optimizer, scaler=scaler,
+                                    expected_fingerprints=fingerprints)
             start_epoch, global_step = state["epoch"] + 1, state["global_step"]
             best_metric, history = state["best_metric"], state["history"]
             logger.info("Resumed checkpoint=%s start_epoch=%d global_step=%d",
@@ -132,17 +155,35 @@ def train(config: TrainingConfig, adapter=None, validation_fn=None) -> dict:
                 batch_number = (start // config.batch_size) + 1
                 examples = [dataset[index] for index in range(start, min(start + config.batch_size, len(dataset)))]
                 batch = collate_training_batch(examples, manifest["candidates"])
-                queries = adapter.forward_queries(batch["image_paths"], batch["questions"], training=True)
-                documents = adapter.forward_documents(batch["document_texts"])
-                loss = multi_positive_info_nce(queries, documents, batch["positive_mask"].to(adapter.device),
+                if adapter.device.type == "cuda":
+                    torch.cuda.reset_peak_memory_stats(adapter.device)
+                logger.info("Batch start epoch=%d batch=%d/%d queries=%s documents=%d",
+                            epoch + 1, batch_number, total_batches, batch["ids"], len(batch["document_texts"]))
+                with torch.autocast(device_type=adapter.device.type, dtype=amp_dtype, enabled=amp_enabled):
+                    queries = adapter.forward_queries(batch["image_paths"], batch["questions"], training=True)
+                    logger.info("Batch tokens queries=%s", adapter.token_stats.get("queries"))
+                    documents = adapter.forward_documents(batch["document_texts"])
+                # Compute contrastive scores/loss in float32 for numerical stability.
+                loss = multi_positive_info_nce(queries.float(), documents.float(), batch["positive_mask"].to(adapter.device),
                                                batch["valid_mask"].to(adapter.device), config.temperature)
-                (loss / config.accumulation_steps).backward()
+                window_size = min(config.accumulation_steps,
+                                  total_batches - ((batch_number - 1) // config.accumulation_steps) * config.accumulation_steps)
+                scaler.scale(loss / window_size).backward()
                 losses.append(float(loss.detach().cpu()))
                 if batch_number % config.accumulation_steps == 0 or start + config.batch_size >= len(dataset):
+                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(adapter.backend.parameters(), config.max_gradient_norm)
-                    optimizer.step()
+                    scaler.step(optimizer)
+                    scaler.update()
                     optimizer.zero_grad(set_to_none=True)
                     global_step += 1
+                logger.info("Batch tokens documents=%s", adapter.token_stats.get("documents"))
+                if adapter.device.type == "cuda":
+                    logger.info("Batch CUDA MiB allocated=%.1f reserved=%.1f peak=%.1f",
+                                torch.cuda.memory_allocated(adapter.device) / 2**20,
+                                torch.cuda.memory_reserved(adapter.device) / 2**20,
+                                torch.cuda.max_memory_allocated(adapter.device) / 2**20)
+                del queries, documents, loss
                 if batch_number % config.log_every_steps == 0 or batch_number == total_batches:
                     elapsed = time.monotonic() - epoch_started
                     eta = (elapsed / batch_number) * (total_batches - batch_number)
@@ -173,13 +214,13 @@ def train(config: TrainingConfig, adapter=None, validation_fn=None) -> dict:
                 metric,
                 _format_duration(time.monotonic() - epoch_started),
             )
-            save_checkpoint(config.output_dir / "last.pt", adapter, optimizer, None, None, epoch=epoch,
+            save_checkpoint(config.output_dir / "last.pt", adapter, optimizer, None, scaler, epoch=epoch,
                             global_step=global_step, best_metric=max(best_metric, metric), history=history,
                             config=effective_config, fingerprints=fingerprints)
             logger.info("Saved last checkpoint path=%s", config.output_dir / "last.pt")
             if metric > best_metric:
                 best_metric, stale_epochs = metric, 0
-                save_checkpoint(config.output_dir / "best.pt", adapter, optimizer, None, None, epoch=epoch,
+                save_checkpoint(config.output_dir / "best.pt", adapter, optimizer, None, scaler, epoch=epoch,
                                 global_step=global_step, best_metric=best_metric, history=history,
                                 config=effective_config, fingerprints=fingerprints)
                 logger.info("Saved best checkpoint path=%s metric=%.6f",
@@ -195,6 +236,12 @@ def train(config: TrainingConfig, adapter=None, validation_fn=None) -> dict:
                     best_metric, global_step, _format_duration(time.monotonic() - run_started))
         return {"best_metric": best_metric, "global_step": global_step, "history": history}
     except Exception:
+        if "adapter" in locals() and adapter is not None and adapter.device.type == "cuda":
+            logger.error("Failure CUDA MiB allocated=%.1f reserved=%.1f peak=%.1f tokens=%s",
+                         torch.cuda.memory_allocated(adapter.device) / 2**20,
+                         torch.cuda.memory_reserved(adapter.device) / 2**20,
+                         torch.cuda.max_memory_allocated(adapter.device) / 2**20,
+                         adapter.token_stats)
         logger.exception("Training run failed")
         raise
     finally:

@@ -19,11 +19,15 @@ def main(argv=None):
     parser.add_argument("--output-dir", type=Path, default=ROOT / "runs/finetune_visual_bge")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--temperature", type=float, default=.02)
-    parser.add_argument("--hard-negative-count", type=int, default=4)
-    parser.add_argument("--accumulation-steps", type=int, default=1)
+    parser.add_argument("--hard-negative-count", type=int, default=1)
+    parser.add_argument("--accumulation-steps", type=int, default=16)
+    parser.add_argument("--query-max-length", type=int, default=256)
+    parser.add_argument("--document-max-length", type=int, default=512)
+    parser.add_argument("--precision", choices=("fp32", "fp16", "bf16"), default="fp16")
+    parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--max-train-samples",
         type=int,

@@ -1,4 +1,4 @@
-"""Run structured-corpus Visualized-BGE retrieval with cross-encoder reranking."""
+﻿"""Run structured-corpus Visualized-BGE retrieval with cross-encoder reranking."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from legalqa.data.loaders import read_json
-from legalqa.evaluation.metrics import eval_retrieval
+from legalqa.evaluation.results import save_results
 from legalqa.structured_reranker.pipeline import (
     CrossEncoderReranker,
     INDEX_FILE,
@@ -44,12 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-weight", type=Path, default=ROOT / "artifacts/models/Visualized_m3.pth")
     parser.add_argument("--reranker-model", default="BAAI/bge-reranker-v2-m3")
     parser.add_argument("--index-dir", type=Path, default=ROOT / "runs/structured_reranker")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "outputs/structured_reranker")
-    parser.add_argument(
-        "--official-baseline",
-        type=Path,
-        default=ROOT / "outputs/raw/official_baseline_predictions.json",
-    )
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "outputs")
     parser.add_argument("--chunk-tokens", type=int, default=512)
     parser.add_argument("--chunk-overlap", type=int, default=1)
     parser.add_argument("--chunk-shortlist-size", type=int, default=200)
@@ -62,16 +57,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--rebuild-index", action="store_true")
     return parser
-
-
-def _write_json(path: Path, value) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
 
 
 def _make_visualized_retriever(
@@ -93,8 +78,8 @@ def _make_visualized_retriever(
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    if args.article_shortlist_size < args.top_k or args.top_k < 1:
-        raise ValueError("article-shortlist-size must be at least top-k and top-k must be positive")
+    if args.article_shortlist_size < max(10, args.top_k) or args.top_k < 1:
+        raise ValueError("article-shortlist-size must be at least max(10, top-k) and top-k must be positive")
 
     questions = read_json(args.questions)
     retriever = _make_visualized_retriever(
@@ -161,38 +146,15 @@ def main(argv=None) -> int:
         )
         print(f"Reranked query {index}/{len(questions)}", flush=True)
 
-    dense_predictions = build_predictions(questions, dense_rankings, candidates, args.top_k)
-    reranked_predictions = build_predictions(questions, reranked_rankings, candidates, args.top_k)
-    _write_json(args.output_dir / "dense_predictions.json", dense_predictions)
-    _write_json(args.output_dir / "reranked_predictions.json", reranked_predictions)
-
-    metrics = {
-        "chunk_count": len(candidates),
-        "article_count": len({(item["law_id"], item["label_id"]) for item in candidates}),
-        "chunk_tokens": args.chunk_tokens,
-        "chunk_overlap": args.chunk_overlap,
-        "chunk_shortlist_size": args.chunk_shortlist_size,
-        "article_shortlist_size": args.article_shortlist_size,
-        "chunks_per_article": args.chunks_per_article,
-        "top_k": args.top_k,
-        "image_descriptions_used": False,
-    }
-    if all("relevant_articles" in question for question in questions):
-        metrics["structured_dense"] = {
-            key: float(value) for key, value in eval_retrieval(dense_predictions, questions).items()
-        }
-        metrics["structured_reranked"] = {
-            key: float(value) for key, value in eval_retrieval(reranked_predictions, questions).items()
-        }
-        if args.official_baseline.is_file():
-            official = read_json(args.official_baseline)
-            metrics["official_baseline"] = {
-                key: float(value) for key, value in eval_retrieval(official, questions).items()
-            }
-    _write_json(args.output_dir / "metrics.json", metrics)
+    rankings = build_predictions(questions, reranked_rankings, candidates, max(10, args.top_k))
+    metrics = save_results(rankings, questions, rankings, args.output_dir,
+                           "structured_reranker", args.top_k)
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+

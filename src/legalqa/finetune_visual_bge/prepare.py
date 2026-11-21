@@ -7,10 +7,44 @@ from pathlib import Path
 import random
 
 from .corpus import build_candidate_units, read_structured_corpus
-from .labels import apply_aliases, resolve_label
+from .labels import LabelResolutionError, apply_aliases, resolve_label
 
 
 SCHEMA_VERSION = 1
+
+
+def filter_training_questions(questions, images_dir, candidates, aliases):
+    """Reject whole questions so training never uses incomplete positive sets."""
+    valid, rejected = [], []
+    for index, question in enumerate(questions):
+        reasons = []
+        if not isinstance(question, dict):
+            rejected.append({"input_index": index, "id": None, "reasons": ["question must be an object"]})
+            continue
+        for field in ("id", "image_id", "question"):
+            if not isinstance(question.get(field), str) or not question[field].strip():
+                reasons.append(f"missing or invalid {field}")
+        if isinstance(question.get("image_id"), str):
+            image = images_dir / f"{question['image_id']}.jpg"
+            if not image.is_file():
+                reasons.append(f"missing image {image}")
+        labels = question.get("relevant_articles")
+        if not isinstance(labels, list) or not labels:
+            reasons.append("missing or invalid positive labels")
+        else:
+            for label in labels:
+                if not isinstance(label, dict) or not label.get("law_id") or not label.get("article_id"):
+                    reasons.append("label must contain law_id and article_id")
+                    continue
+                try:
+                    resolve_label(label["law_id"], label["article_id"], candidates, aliases)
+                except LabelResolutionError as error:
+                    reasons.append(str(error))
+        if reasons:
+            rejected.append({"input_index": index, "id": question.get("id"), "reasons": reasons})
+        else:
+            valid.append(question)
+    return valid, rejected
 
 
 def _sha256(path: Path) -> str:
@@ -53,6 +87,12 @@ def prepare_finetune_data(train_path: Path, images_dir: Path, corpus_path: Path,
     questions = json.loads(train_path.read_text(encoding="utf-8"))
     aliases = json.loads(aliases_path.read_text(encoding="utf-8"))
     candidates = apply_aliases(build_candidate_units(read_structured_corpus(corpus_path)), aliases)
+    questions, rejected = filter_training_questions(questions, images_dir, candidates, aliases)
+    rejection_path = output_path.with_name(output_path.stem + "_rejected.json")
+    _write_json_atomic(rejection_path, {"count": len(rejected), "questions": rejected})
+    print(f"Training inputs: kept={len(questions)}, rejected={len(rejected)}; report={rejection_path}")
+    if not questions:
+        raise ValueError("No valid training questions remain; see rejection report")
     candidate_index = {candidate.key: index for index, candidate in enumerate(candidates)}
     coverage = Counter()
     prepared = []
@@ -90,6 +130,7 @@ def prepare_finetune_data(train_path: Path, images_dir: Path, corpus_path: Path,
         "questions": prepared,
         "splits": {"train": train_ids, "validation": validation_ids},
         "coverage": dict(sorted(coverage.items())),
+        "rejected_questions": rejected,
     }
     _write_json_atomic(output_path, manifest)
     return manifest

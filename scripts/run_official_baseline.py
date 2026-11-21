@@ -1,4 +1,4 @@
-"""Run the official Subtask 1 baseline with this workspace's data paths."""
+﻿"""Run the official Subtask 1 baseline with this workspace's data paths."""
 
 from pathlib import Path
 import sys
@@ -18,8 +18,10 @@ OUTPUT_DIR = ROOT / "artifacts/official_baseline"
 
 def main():
     make_embedding(LAW_PATH, LAW_IMAGE_DIR, MODEL_WEIGHT, OUTPUT_DIR)
-    retrieval(QUESTION_PATH, QUESTION_IMAGE_DIR, MODEL_WEIGHT, OUTPUT_DIR)
+    retrieval(QUESTION_PATH, QUESTION_IMAGE_DIR, MODEL_WEIGHT, OUTPUT_DIR,
+              ROOT / "outputs")
 
 
 if __name__ == "__main__":
     main()
+

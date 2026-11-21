@@ -15,6 +15,8 @@ Kết quả được chia thành hai nhóm:
 
 ## Evaluation
 
-- `evaluation/metrics.json`: dữ liệu metric có cấu trúc để xử lý bằng chương trình.
+- `evaluation/img_to_txt/metrics.json`: metric BGE-M3 dense/reranked hiện tại của image-to-text.
+- `evaluation/structured_reranker/metrics.json`: metric dense/reranked của structured reranker.
+- `evaluation/official_baseline/metrics.json`: metric của official Visualized-BGE baseline.
 - `evaluation/summary.md`: bản tóm tắt kết quả và kết luận.
 
